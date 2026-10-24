@@ -155,8 +155,60 @@ public class DynEqService {
         return new DynamicsProcessing(0, SESSION, bb.build());
     }
 
+    // ==========================================================================
+    // 单实例锁
+    //
+    // 为什么必须有
+    //   每个实例都会往同一个 session 0 上挂一个 DynamicsProcessing。
+    //   挂 3 个 = 同一条 EQ 曲线被叠了 3 次，低频能叠到 +21dB。
+    //   实测出现过 3 个实例并存（旧开机脚本 + 模块 service.sh + 执行按钮各拉一个），
+    //   声音严重失真，而 dumpsys 里只看得到「3 Clients」，很容易被忽略。
+    //
+    // 实现
+    //   FileChannel.tryLock() 由内核持有，进程被 kill -9 时自动释放，不会留下死锁。
+    //   拿不到锁 = 已有实例在跑 → 本进程直接退出，绝不重复挂 effect。
+    // ==========================================================================
+    static final String LOCK = "/data/adb/spk-eq/service.lock";
+    static RandomAccessFile lockRaf = null;
+    static java.nio.channels.FileLock lockObj = null;
+
+    /** 尝试独占；成功返回 true，已有实例返回 false */
+    static boolean acquireLock() {
+        try {
+            lockRaf = new RandomAccessFile(LOCK, "rw");
+            lockObj = lockRaf.getChannel().tryLock();
+            if (lockObj == null) {
+                // 读出对方 pid 便于排查
+                String other = "";
+                try {
+                    lockRaf.seek(0);
+                    byte[] b = new byte[32];
+                    int r = lockRaf.read(b);
+                    if (r > 0) other = new String(b, 0, r).trim();
+                } catch (Throwable ignored) {}
+                log("已有实例在运行 (pid=" + (other.isEmpty() ? "?" : other) + ")，本进程退出");
+                return false;
+            }
+            // 拿到锁：写入自己的 pid
+            lockRaf.seek(0);
+            lockRaf.setLength(0);
+            lockRaf.write((android.os.Process.myPid() + "\n").getBytes());
+            lockRaf.getChannel().force(true);
+            return true;
+        } catch (Throwable t) {
+            // 锁文件异常不应导致音效失效，降级为无锁运行
+            log("lock 异常（降级无锁运行）: " + t.getClass().getSimpleName());
+            return true;
+        }
+    }
+
     public static void main(String[] args) {
-        log("=== DynEqService start (DynamicsProcessing, " + MAXB + " bands) ===");
+        if (!acquireLock()) {
+            System.out.println("已存在运行中的实例，退出");
+            return;
+        }
+        log("=== DynEqService start (DynamicsProcessing, " + MAXB + " bands) pid="
+                + android.os.Process.myPid() + " ===");
         DynamicsProcessing dp = null;
         String last = null;
         float[] fr = new float[MAXB], gn = new float[MAXB];

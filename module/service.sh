@@ -9,6 +9,11 @@
 # 为什么用 app_process 而不是 APK
 #   不需要界面、不需要签名、不占通知栏，root 身份直接跑 dex，
 #   卸载模块即彻底清除。
+#
+# 为什么不用 ps 找进程
+#   busybox 的 ps 不支持 `-o PID,ARGS`，会报
+#   `ps: bad -o argument 'PID'`，导致旧实例杀不掉、多实例叠加。
+#   这里统一读 /proc/<pid>/cmdline。
 # ==============================================================================
 MODDIR=${0%/*}
 D=/data/adb/spk-eq
@@ -16,6 +21,18 @@ LOG=$D/boot.log
 mkdir -p "$D"
 
 log() { echo "$(date '+%m-%d %H:%M:%S')  $*" >> "$LOG"; }
+
+eq_pids() {
+  # 关键细节：匹配模式绝不能出现在本进程自己的 cmdline 里，否则会 kill 到自己。
+  # 真身进程的 cmdline 是 app_process\0/system/bin\0DynEqService，
+  # 而本脚本/shell/grep 的 cmdline 都以别的字符开头，用 '^app_process' 天然排除。
+  # 两次 grep 就是全部开销（约 0.1 秒），不做逐进程 fork。
+  grep -la '^app_process' /proc/[0-9]*/cmdline 2>/dev/null \
+    | xargs -r grep -la 'DynEqService' 2>/dev/null \
+    | while read -r f; do
+        p=${f#/proc/}; echo "${p%/cmdline}"
+      done
+}
 
 log "=== 一加13扬声器音效 启动 ==="
 
@@ -30,18 +47,22 @@ log "boot_completed 就绪（${i}s）"
 sleep 25
 
 # 清理残留实例（模块更新会留下旧进程）
-for p in $(ps -A -o PID,ARGS 2>/dev/null | grep app_process | grep -i DynEqService | grep -v grep | awk '{print $1}'); do
-  kill -9 "$p" 2>/dev/null
-  log "清理旧实例 pid=$p"
+for round in 1 2 3; do
+  pids=$(eq_pids)
+  [ -z "$pids" ] && break
+  for p in $pids; do
+    kill -9 "$p" 2>/dev/null && log "清理旧实例 pid=$p"
+  done
+  sleep 1
 done
-sleep 1
 
 cd "$D" || { log "ERROR: 无法进入 $D"; exit 1; }
-nohup sh -c "CLASSPATH=$MODDIR/spk-eq.dex app_process /system/bin DynEqService" > /data/local/tmp/spkeq.out 2>&1 &
+nohup sh -c "CLASSPATH=$MODDIR/spk-eq.dex app_process /system/bin DynEqService" \
+  > /data/local/tmp/spkeq.out 2>&1 < /dev/null &
 log "服务已拉起 pid=$!"
 
 sleep 3
-if ps -A -o ARGS 2>/dev/null | grep -q "app_process /system/bin DynEqService"; then
+if [ -n "$(eq_pids)" ]; then
   log "确认存活 OK"
 else
   log "ERROR: 服务没起来"
