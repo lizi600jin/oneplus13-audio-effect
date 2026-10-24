@@ -203,17 +203,7 @@ KernelSU / Magisk → 模块 → 移除 → 重启。
 
 ---
 
-## 自己编译
 
-```bash
-export ANDROID_JAR=~/android-sdk/platforms/android-36/android.jar
-./build.sh
-```
-
-需要 Android SDK 的 `android.jar` 和 build-tools（提供 `d8`）。
-产物是 `spk-eq-v<版本>.zip`。
-
----
 
 ## 常见问题
 
