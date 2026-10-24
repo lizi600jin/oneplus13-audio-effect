@@ -1,0 +1,6 @@
+*.zip
+build/
+out/
+*.dex
+*.class
+.DS_Store
