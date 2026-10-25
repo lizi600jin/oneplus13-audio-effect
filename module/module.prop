@@ -1,6 +1,6 @@
 id=spk_eq_master
 name=一加13扬声器音效
-version=v1.1
-versionCode=111
+version=v1.2
+versionCode=120
 author=600斤的立子
-description=术力口/女声向 10 段参数 EQ + 可选多段压缩，作用于全局扬声器输出。FFT 频域分段（blockSize=512，bin 宽 93.75Hz）：抬 200Hz 鼓点冲击、削 469~750Hz 掩蔽区（喇叭谐振 714~758Hz）治糊、补 4500Hz 中高频衔接、抬 8115Hz 亮度。开机自启，改 /data/adb/spk-eq/conf 即时生效，无需重启。
+description=术力口/女声向 10 段参数 EQ，只对内置扬声器生效，蓝牙/USB 耳机自动旁路。FFT 频域分段（blockSize=512，bin 宽 93.75Hz）：抬 200Hz 鼓点冲击、削 469~750Hz 掩蔽区（喇叭谐振 714~758Hz）治糊、补 4500Hz 中高频衔接、抬 8115Hz 亮度。开机自启，改 /data/adb/spk-eq/conf 即时生效，无需重启。插入蓝牙/USB 耳机时自动卸载音效，拔掉自动恢复。

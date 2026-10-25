@@ -36,6 +36,14 @@ eq_pids() {
 
 log "=== 一加13扬声器音效 启动 ==="
 
+# 总开关检查：/data/adb/spk-eq/off 存在则不启动服务（彻底不占资源）
+# 注意：不能直接 exit 而不留痕迹，否则用户会以为模块坏了
+if [ -f /data/adb/spk-eq/off ]; then
+  log "总开关=关（/data/adb/spk-eq/off 存在），本次开机不启动服务"
+  log "删掉该文件或点模块卡片的「执行」按钮即可恢复"
+  exit 0
+fi
+
 # 等 boot_completed（最多 120 秒）
 i=0
 while [ "$(getprop sys.boot_completed)" != "1" ] && [ $i -lt 120 ]; do

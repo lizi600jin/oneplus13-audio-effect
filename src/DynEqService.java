@@ -78,6 +78,120 @@ public class DynEqService {
         return sb.toString().trim();
     }
 
+
+    // ==========================================================================
+    // 输出路由检测 —— 让 EQ 只作用于内置扬声器
+    //
+    // 为什么需要
+    //   DynamicsProcessing 挂在 SESSION 0（AUDIO_SESSION_OUTPUT_MIX）上，
+    //   AOSP 的 createEffect_l() 允许 MIXER 类型线程挂全局 effect。
+    //   扬声器和蓝牙 A2DP 都是 MIXER 线程 → effect 会自动跟到当前活跃的那个线程。
+    //   实测：插着 OPPO Enco Free4 时 effect 挂在 AudioOut_AD（蓝牙线程），
+    //   全频段 -15dB 时耳机里声音几乎消失，确认真实生效。
+    //   K1 曲线是补偿这两颗物理喇叭的缺陷（650Hz -7dB 治 f0=714~758Hz 谐振），
+    //   叠加到耳机上只会把声音弄坏 → 必须在非扬声器路由上停掉。
+    //
+    // 实现
+    //   AudioManager.getDevicesForAttributes(MEDIA) 返回当前 MEDIA 输出的设备，
+    //   元素是 AudioDeviceAttributes，getType() 给出 AudioDeviceInfo.TYPE_* 编号。
+    //   实测（插蓝牙）返回 type=8 (TYPE_BLUETOOTH_A2DP)，干净可用。
+    //
+    //   注意：这个 Context 用反射从 ActivityThread 拿，调用前必须先 Looper.prepare()，
+    //   否则 ActivityThread.systemMain() 内部 new Handler() 会抛
+    //   "Can't create handler inside thread that has not called Looper.prepare()"。
+    //   但只需要 prepare()，不需要 loop()：getDevicesForAttributes 是 binder 同步调用。
+    //
+    // 开关
+    //   /data/adb/spk-eq/all_devices 文件存在 → 对所有设备生效（旧行为/回退用）
+    //   不存在 → 只对内置扬声器生效（默认，用户要求）
+    // ==========================================================================
+
+    static final int TYPE_BUILTIN_SPEAKER      = 2;
+    static final int TYPE_BUILTIN_SPEAKER_SAFE = 24;
+    static final String ALL_DEVICES_FLAG = "/data/adb/spk-eq/all_devices";
+    static final String OFF_FLAG = "/data/adb/spk-eq/off";
+
+    static Object audioManager = null;
+    static java.lang.reflect.Method mGetDevicesForAttr = null;
+    static boolean routeInited = false;
+
+    /** 懒初始化 AudioManager（反射拿 SystemContext，避免 VerifyError） */
+    static void initRouteProbe() {
+        if (routeInited) return;
+        routeInited = true;
+        try {
+            android.os.Looper.prepare();
+        } catch (Throwable ignored) {}
+        try {
+            Class<?> atCls = Class.forName("android.app.ActivityThread");
+            Object at = atCls.getMethod("systemMain").invoke(null);
+            android.content.Context ctx =
+                    (android.content.Context) atCls.getMethod("getSystemContext").invoke(at);
+            audioManager = ctx.getSystemService(android.content.Context.AUDIO_SERVICE);
+            if (audioManager != null) {
+                mGetDevicesForAttr = audioManager.getClass()
+                        .getMethod("getDevicesForAttributes",
+                                Class.forName("android.media.AudioAttributes"));
+            }
+            log("route probe ready (AudioManager=" + (audioManager != null) + ")");
+        } catch (Throwable t) {
+            Throwable c = t;
+            while (c.getCause() != null) c = c.getCause();
+            log("route probe init 失败: " + c.getClass().getSimpleName() + ": " + c.getMessage());
+        }
+    }
+
+    /**
+     * 当前 MEDIA 输出设备类型。
+     * 返回 -1 表示检测失败（调用方应视为「扬声器」，保持原行为，避免误关）。
+     */
+    static int routeType() {
+        if (!routeInited) initRouteProbe();
+        if (audioManager == null || mGetDevicesForAttr == null) return -1;
+        try {
+            Object aa = Class.forName("android.media.AudioAttributes$Builder")
+                    .getConstructor().newInstance();
+            Object b = aa;
+            b = b.getClass().getMethod("setUsage", int.class).invoke(b, 1);        // USAGE_MEDIA
+            b = b.getClass().getMethod("setContentType", int.class).invoke(b, 2);  // CONTENT_TYPE_MUSIC
+            Object attrs = b.getClass().getMethod("build").invoke(b);
+
+            Object list = mGetDevicesForAttr.invoke(audioManager, attrs);
+            java.util.List<?> devs = (java.util.List<?>) list;
+            if (devs == null || devs.isEmpty()) return -1;
+            Object d0 = devs.get(0);   // 主输出设备
+            Object t = d0.getClass().getMethod("getType").invoke(d0);
+            return ((Integer) t).intValue();
+        } catch (Throwable t) {
+            Throwable c = t;
+            while (c.getCause() != null) c = c.getCause();
+            log("routeType 失败: " + c.getClass().getSimpleName() + ": " + c.getMessage());
+            return -1;
+        }
+    }
+
+    static String routeName(int t) {
+        switch (t) {
+            case -1: return "unknown";
+            case 0:  return "none";
+            case 1:  return "earpiece";
+            case 2:  return "speaker";
+            case 3:  return "wired_headset";
+            case 4:  return "wired_headphones";
+            case 7:  return "bt_sco";
+            case 8:  return "bt_a2dp";
+            case 9:  return "hdmi";
+            case 11: return "usb_device";
+            case 12: return "usb_accessory";
+            case 22: return "usb_headset";
+            case 23: return "hearing_aid";
+            case 24: return "speaker_safe";
+            case 26: return "ble_headset";
+            case 27: return "ble_speaker";
+            default: return "type" + t;
+        }
+    }
+
     static DynamicsProcessing build(float[] fr, float[] gn, int n) {
         // 【关键】band 数量必须等于实际频段数 n
         // 之前用 MAXB=10 并把剩余 band 填成 40*2^i，会造成频点序列非单调
@@ -209,8 +323,19 @@ public class DynEqService {
         }
         log("=== DynEqService start (DynamicsProcessing, " + MAXB + " bands) pid="
                 + android.os.Process.myPid() + " ===");
+
+        boolean allDev = new File(ALL_DEVICES_FLAG).exists();
+        if (new File(OFF_FLAG).exists()) {
+            log("作用范围: 总开关=关（模块不生效，删 " + OFF_FLAG + " 恢复）");
+        } else if (allDev) {
+            log("作用范围: 所有输出设备（all_devices 开关存在）");
+        } else {
+            log("作用范围: 仅内置扬声器（蓝牙/USB 自动旁路）");
+        }
+
         DynamicsProcessing dp = null;
         String last = null;
+        int lastRoute = Integer.MIN_VALUE;
         float[] fr = new float[MAXB], gn = new float[MAXB];
 
         while (true) {
@@ -223,13 +348,43 @@ public class DynEqService {
                     if (mf.exists()) cur += " |mbc:" + new String(java.nio.file.Files.readAllBytes(mf.toPath())).replace("\n", ";");
                 } catch (Throwable ignored) {}
 
-                if (!cur.equals(last)) {
+                // ---- 路由判定：非扬声器就强制旁路 ----
+                // 总开关优先：/data/adb/spk-eq/off 存在 → 整个模块停止工作。
+                // 用途一：自动识别失效时（罕见 USB DAC）手动兜底。
+                // 用途二：KernelSU 模块卡片的「执行」按钮就是切换这个文件。
+                boolean forceOff = new File(OFF_FLAG).exists();
+                boolean routeOk;
+                if (forceOff) {
+                    routeOk = false;
+                } else if (allDev) {
+                    routeOk = true;
+                } else {
+                    int rt = routeType();
+                    routeOk = (rt == TYPE_BUILTIN_SPEAKER
+                            || rt == TYPE_BUILTIN_SPEAKER_SAFE
+                            || rt == -1);   // -1 检测失败 → 保守视为扬声器，不让音效凭空消失
+                    if (rt != lastRoute) {
+                        log("路由变化 -> " + routeName(rt) + "(" + rt + ")"
+                                + (routeOk ? "  生效" : "  旁路"));
+                        lastRoute = rt;
+                    }
+                }
+
+                // 路由状态 + 总开关状态并入签名，
+                // 任一变化（插拔耳机 / 点模块卡片按钮）都立刻重建
+                String want = cur + (forceOff ? " |MASTER_OFF" : routeOk ? " |ON" : " |ROUTE_OFF");
+
+                if (!want.equals(last)) {
                     boolean allZero = true;
                     for (int i = 0; i < n; i++) if (Math.abs(gn[i]) > 0.01f) { allZero = false; break; }
 
                     if (dp != null) { try { dp.release(); } catch (Throwable ignored) {} dp = null; }
 
-                    if (n == 0 || allZero) {
+                    if (forceOff || !routeOk) {
+                        log(forceOff
+                                ? "BYPASS (总开关已关闭模块，已卸载 effect)"
+                                : "BYPASS (非扬声器输出，已卸载 effect)");
+                    } else if (n == 0 || allZero) {
                         log("BYPASS (no bands or all zero)");
                     } else {
                         dp = build(fr, gn, n);
@@ -237,12 +392,12 @@ public class DynEqService {
                         AudioEffect.Descriptor d = dp.getDescriptor();
                         log("APPLY " + cur + "  (" + d.name + ")");
                     }
-                    last = cur;
+                    last = want;
                 }
             } catch (Throwable t) {
                 log("loop error: " + t.getClass().getSimpleName() + ": " + t.getMessage());
             }
-            try { Thread.sleep(200); } catch (Throwable ignored) {}
+            try { Thread.sleep(500); } catch (Throwable ignored) {}
         }
     }
 }
